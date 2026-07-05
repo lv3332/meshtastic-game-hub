@@ -30,9 +30,34 @@
         .cell.miss::after { content: '•'; }
         .log-panel { margin-top: 20px; background-color: var(--panel-bg); padding: 10px; border-radius: 8px; width: 100%; max-width: 600px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;}
         #turnIndicator { width: 100%; max-width: 600px; text-align: center; font-weight: bold; margin-bottom: 10px; padding: 10px; border-radius: 4px; background-color: var(--panel-bg); }
+.navbar {
+    width: 100%;
+    max-width: 600px;
+    background: #313244;
+    padding: 10px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-around;
+    border: 1px solid #45475a;
+}
+.navbar a {
+    color: #89b4fa;
+    text-decoration: none;
+    font-weight: bold;
+    padding: 5px 10px;
+}
+.navbar a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
+
+<div class="navbar">
+    <a href="chess_mesh.html">♟ Шахи</a>
+    <a href="checkers_mesh.html">⛀ Шашки</a>
+    <a href="battleship_mesh.html">🚢 Морський бій</a>
+    <a href="chat_mesh.html">💬 Чат</a>
+</div>
 
     <h1>Meshtastic: Морський Бій</h1>
 
