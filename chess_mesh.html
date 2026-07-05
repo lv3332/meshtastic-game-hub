@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meshtastic Шахи (Локальні)</title>
+    
+    <script src="js/jquery-3.6.0.min.js"></script>
+    <link rel="stylesheet" href="css/chessboard-1.0.0.min.css">
+    <script src="js/chessboard-1.0.0.min.js"></script>
+    <script src="js/chess.min.js"></script>
+
+    <style>
+        :root {
+            --bg-color: #1e1e2e; --text-color: #cdd6f4; --panel-bg: #313244;
+            --grid-border: #45475a; --water-color: #89b4fa;
+        }
+        body { font-family: sans-serif; background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; padding: 10px; margin: 0;}
+        .controls { background-color: var(--panel-bg); padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; width: 100%; max-width: 600px; box-sizing: border-box; }
+        input[type="text"] { padding: 8px; border: 1px solid var(--grid-border); border-radius: 4px; background-color: var(--bg-color); color: var(--text-color); width: 150px; text-align: center; }
+        button { padding: 8px 15px; border: none; border-radius: 4px; background-color: var(--water-color); color: var(--bg-color); font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover:not(:disabled) { opacity: 0.8; }
+        button:disabled { background-color: #585b70; cursor: not-allowed; color: #a6adc8; }
+        
+        #board { width: 100%; max-width: 400px; margin: 0 auto; }
+        
+        .log-panel { margin-top: 20px; background-color: var(--panel-bg); padding: 10px; border-radius: 8px; width: 100%; max-width: 600px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;}
+        #turnIndicator { width: 100%; max-width: 600px; text-align: center; font-weight: bold; margin-bottom: 10px; padding: 10px; border-radius: 4px; background-color: var(--panel-bg); }
+        
+        .white-1e1d7 { background-color: #cdd6f4; color: #1e1e2e; }
+        .black-3c85d { background-color: #89b4fa; color: #1e1e2e; }
+    </style>
+</head>
+<body>
+
+    <h1>Meshtastic: Шахи</h1>
+
+    <div class="controls">
+        <button id="btnConnect" onclick="connectRadio()">🔌 Підключити</button>
+        <input type="text" id="enemyNick" placeholder="Нік суперника">
+        <button id="btnStart" onclick="startGame()" disabled>🚀 Готовий до гри</button>
+    </div>
+
+    <div id="turnIndicator">Очікування підключення модема...</div>
+
+    <div id="board"></div>
+
+    <div class="log-panel" id="logPanel">
+        > Автономний шаховий рушій готовий. Підключіться до модема.<br>
+    </div>
+
+    <script>
+        let radioSocket = null;
+        let gameState = 'WAITING_RADIO'; 
+        let myColor = 'white'; 
+        let game = new Chess();
+        let board = null;
+
+        function log(message) {
+            const panel = document.getElementById('logPanel');
+            panel.innerHTML += `[${new Date().toLocaleTimeString()}] ${message}<br>`;
+            panel.scrollTop = panel.scrollHeight;
+        }
+
+        function setStatus(text, color = "var(--text-color)") {
+            const indicator = document.getElementById('turnIndicator');
+            indicator.innerText = text;
+            indicator.style.color = color;
+        }
+
+        // Перевірка дозволу на рух фігури
+        function onDragStart (source, piece, position, orientation) {
+            if (gameState !== 'PLAYING') return false;
+            if (game.game_over()) return false;
+            
+            // Рухати можна тільки свої фігури
+            if ((myColor === 'white' && piece.search(/^b/) !== -1) ||
+                (myColor === 'black' && piece.search(/^w/) !== -1)) {
+                return false;
+            }
+            
+            // Блокування ходу, якщо черга суперника
+            if ((game.turn() === 'w' && myColor === 'black') ||
+                (game.turn() === 'b' && myColor === 'white')) {
+                return false;
+            }
+        }
+
+        // Обробка успішного ходу гравця
+        function onDrop (source, target) {
+            let move = game.move({
+                from: source,
+                to: target,
+                promotion: 'q' 
+            });
+
+            if (move === null) return 'snapback';
+
+            updateStatus();
+            // Відправляємо хід у форматі: Нік|CHESS:MOVE:e2e4
+            sendOverRadio(`CHESS:MOVE:${source}${target}`);
+        }
+
+        function onSnapEnd () {
+            board.position(game.fen());
+        }
+
+        function updateStatus () {
+            let statusHTML = '';
+            let moveColor = game.turn() === 'w' ? 'Білих' : 'Чорних';
+
+            if (game.in_checkmate()) {
+                gameState = 'GAME_OVER';
+                statusHTML = `Гра завершена: ${moveColor} отримали МАТ.`;
+                setStatus(statusHTML, "var(--hit-color)");
+                log(`🏆 МАТ! Гри кінець.`);
+            } else if (game.in_draw()) {
+                gameState = 'GAME_OVER';
+                statusHTML = 'Гра завершена: НІЧИЯ';
+                setStatus(statusHTML, "var(--text-color)");
+                log(`🤝 Нічия.`);
+            } else {
+                statusHTML = `Хід ${moveColor}`;
+                if (game.in_check()) statusHTML += ' (ШАХ)';
+                
+                if ((game.turn() === 'w' && myColor === 'white') || (game.turn() === 'b' && myColor === 'black')) {
+                    setStatus("🟢 " + statusHTML + " - ВАШ ХІД!", "var(--ship-color)");
+                } else {
+                    setStatus("🔴 " + statusHTML + " - Чекаємо суперника.", "var(--hit-color)");
+                }
+            }
+        }
+
+        // Налаштування дошки з локальними картинками фігур
+        let config = {
+            draggable: true,
+            position: 'start',
+            onDragStart: onDragStart,
+            onDrop: onDrop,
+            onSnapEnd: onSnapEnd,
+            pieceTheme: 'img/chesspieces/wikipedia/{piece}.png'
+        };
+
+        // --- ЗВ'ЯЗОК З PYTHON СЕРВЕРОМ ---
+        function connectRadio() {
+            log("> Підключення до сервера...");
+            radioSocket = new WebSocket("ws://" + window.location.host + "/ws"); 
+            
+            radioSocket.onopen = () => {
+                log("> 🟢 Підключено до локального хабу!");
+                document.getElementById('btnConnect').disabled = true;
+                document.getElementById('btnStart').disabled = false;
+                gameState = 'SETUP';
+                
+                board = Chessboard('board', config);
+                $(window).resize(board.resize); 
+                
+                setStatus("Натисніть 'Готовий до гри'", "var(--text-color)");
+            };
+
+            radioSocket.onmessage = (event) => onRadioMessageReceived(event.data);
+            radioSocket.onerror = () => log("❌ Помилка з'єднання з bridge.py");
+        }
+
+        function sendOverRadio(textPayload) {
+            if (radioSocket && radioSocket.readyState === WebSocket.OPEN) {
+                let target = document.getElementById('enemyNick').value.trim();
+                if (target === "") target = "BROADCAST";
+                
+                log(`📡 ВІДПРАВКА: ${textPayload}`);
+                radioSocket.send(`${target}|${textPayload}`);
+            }
+        }
+
+        function onRadioMessageReceived(msg) {
+            if (msg.startsWith('SYS:ERROR:')) return log(`❌ Помилка: ${msg.split(':')[2]}`);
+            if (!msg.startsWith('CHESS:')) return; 
+
+            log(`📥 ОТРИМАНО: ${msg}`);
+            const parts = msg.split(':');
+            const cmd = parts[1];
+
+            if (gameState === 'GAME_OVER') return;
+
+            // Хендшейк розподілу кольорів фігур
+            if (cmd === 'READY') {
+                log("> Суперник готовий!");
+                if (gameState === 'WAITING_OPPONENT') {
+                    startGamePlay('white');
+                    sendOverRadio("CHESS:START"); 
+                }
+            } 
+            else if (cmd === 'START') {
+                if (gameState === 'WAITING_OPPONENT') {
+                    startGamePlay('black');
+                }
+            }
+            // Отримання ходу суперника через ефір
+            else if (cmd === 'MOVE') { 
+                let moveStr = parts[2]; 
+                let source = moveStr.substring(0, 2);
+                let target = moveStr.substring(2, 4);
+                
+                game.move({ from: source, to: target, promotion: 'q' });
+                board.position(game.fen());
+                updateStatus();
+            }
+        }
+
+        function startGame() {
+            gameState = 'WAITING_OPPONENT';
+            document.getElementById('btnStart').disabled = true;
+            setStatus("Очікуємо відповіді суперника...", "var(--water-color)");
+            sendOverRadio("CHESS:READY"); 
+        }
+
+        function startGamePlay(color) {
+            gameState = 'PLAYING';
+            myColor = color;
+            
+            if (myColor === 'black') {
+                board.orientation('black');
+            }
+            
+            log(`🔥 Гра розпочата! Ваш колір фігур: ${color === 'white' ? 'БІЛІ' : 'ЧОРНІ'}.`);
+            updateStatus();
+        }
+    </script>
+</body>
+</html>

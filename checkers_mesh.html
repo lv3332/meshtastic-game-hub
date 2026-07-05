@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meshtastic Шашки (Офлайн)</title>
+    <style>
+        :root {
+            --bg-color: #1e1e2e; --text-color: #cdd6f4; --panel-bg: #313244;
+            --grid-border: #45475a; --water-color: #89b4fa;
+            --dark-sq: #45475a; --light-sq: #1e1e2e;
+            --white-piece: #cdd6f4; --black-piece: #f38ba8;
+            --highlight: rgba(166, 227, 161, 0.4);
+        }
+        body { font-family: sans-serif; background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; padding: 10px; margin: 0;}
+        .controls { background-color: var(--panel-bg); padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; width: 100%; max-width: 600px; box-sizing: border-box; }
+        input[type="text"] { padding: 8px; border: 1px solid var(--grid-border); border-radius: 4px; background-color: var(--bg-color); color: var(--text-color); width: 150px; text-align: center; }
+        button { padding: 8px 15px; border: none; border-radius: 4px; background-color: var(--water-color); color: var(--bg-color); font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover:not(:disabled) { opacity: 0.8; }
+        button:disabled { background-color: #585b70; cursor: not-allowed; color: #a6adc8; }
+        
+        .log-panel { margin-top: 20px; background-color: var(--panel-bg); padding: 10px; border-radius: 8px; width: 100%; max-width: 600px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;}
+        #turnIndicator { width: 100%; max-width: 600px; text-align: center; font-weight: bold; margin-bottom: 10px; padding: 10px; border-radius: 4px; background-color: var(--panel-bg); }
+        
+        /* CSS Малювання дошки та фішок */
+        #board { display: grid; grid-template-columns: repeat(8, 40px); grid-template-rows: repeat(8, 40px); border: 2px solid var(--grid-border); margin: 0 auto; transition: transform 0.5s; }
+        .square { width: 40px; height: 40px; display: flex; justify-content: center; align-items: center; }
+        .square.dark { background-color: var(--dark-sq); cursor: pointer; }
+        .square.light { background-color: var(--light-sq); }
+        .square.selected { box-shadow: inset 0 0 0 3px var(--water-color); }
+        .square.valid-move { background-color: var(--highlight); }
+
+        .piece { width: 30px; height: 30px; border-radius: 50%; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: transform 0.5s; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 1.2rem; color: #11111b; user-select: none; }
+        .piece.white { background-color: var(--white-piece); border: 2px solid #a6adc8; }
+        .piece.black { background-color: var(--black-piece); border: 2px solid #eba0ac; }
+        
+        /* Дамка (King) отримує корону */
+        .piece.king::after { content: '👑'; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+
+    <h1>Meshtastic: Шашки</h1>
+
+    <div class="controls">
+        <button id="btnConnect" onclick="connectRadio()">🔌 Підключити</button>
+        <input type="text" id="enemyNick" placeholder="Нік суперника">
+        <button id="btnStart" onclick="startGame()" disabled>🚀 Готовий до гри</button>
+    </div>
+
+    <div id="turnIndicator">Очікування підключення модема...</div>
+
+    <div id="board"></div>
+
+    <div class="log-panel" id="logPanel">
+        > Автономний рушій шашок готовий. 0 залежностей.<br>
+    </div>
+
+    <script>
+        // --- СТАН ГРИ ---
+        let radioSocket = null;
+        let gameState = 'WAITING_RADIO'; 
+        let myColor = 'white'; 
+        let myTurn = false;
+        
+        // 0 - пусто, 1 - біла, 2 - чорна, 3 - біла дамка, 4 - чорна дамка
+        let board = [
+            [0, 2, 0, 2, 0, 2, 0, 2],
+            [2, 0, 2, 0, 2, 0, 2, 0],
+            [0, 2, 0, 2, 0, 2, 0, 2],
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 1, 0, 1, 0, 1, 0],
+            [0, 1, 0, 1, 0, 1, 0, 1],
+            [1, 0, 1, 0, 1, 0, 1, 0]
+        ];
+
+        let selectedSquare = null; // {x, y}
+
+        // --- ЛОГУВАННЯ ---
+        function log(msg) {
+            const panel = document.getElementById('logPanel');
+            panel.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`;
+            panel.scrollTop = panel.scrollHeight;
+        }
+
+        function setStatus(text, color = "var(--text-color)") {
+            const indicator = document.getElementById('turnIndicator');
+            indicator.innerText = text;
+            indicator.style.color = color;
+        }
+
+        // --- ВІЗУАЛІЗАЦІЯ ДОШКИ ---
+        function renderBoard() {
+            const boardDiv = document.getElementById('board');
+            boardDiv.innerHTML = '';
+            
+            for (let y = 0; y < 8; y++) {
+                for (let x = 0; x < 8; x++) {
+                    const sq = document.createElement('div');
+                    const isDark = (x + y) % 2 !== 0;
+                    sq.className = `square ${isDark ? 'dark' : 'light'}`;
+                    sq.id = `sq_${x}_${y}`;
+                    
+                    if (selectedSquare && selectedSquare.x === x && selectedSquare.y === y) {
+                        sq.classList.add('selected');
+                    }
+
+                    if (board[y][x] !== 0) {
+                        const piece = document.createElement('div');
+                        let val = board[y][x];
+                        piece.className = `piece ${val === 1 || val === 3 ? 'white' : 'black'} ${val > 2 ? 'king' : ''}`;
+                        sq.appendChild(piece);
+                    }
+
+                    if (isDark) sq.onclick = () => handleSquareClick(x, y);
+                    boardDiv.appendChild(sq);
+                }
+            }
+        }
+
+        // --- ЛОГІКА ХОДІВ ---
+        function handleSquareClick(x, y) {
+            if (gameState !== 'PLAYING' || !myTurn) return;
+
+            let pieceVal = board[y][x];
+            let isMyPiece = (myColor === 'white' && (pieceVal === 1 || pieceVal === 3)) || 
+                            (myColor === 'black' && (pieceVal === 2 || pieceVal === 4));
+
+            // Вибір своєї фішки
+            if (isMyPiece) {
+                selectedSquare = {x, y};
+                renderBoard();
+                return;
+            }
+
+            // Якщо фішка вибрана і клікаємо на пусту клітинку - пробуємо ходити
+            if (selectedSquare && pieceVal === 0) {
+                if (isValidMove(selectedSquare.x, selectedSquare.y, x, y, board[selectedSquare.y][selectedSquare.x])) {
+                    executeMove(selectedSquare.x, selectedSquare.y, x, y);
+                    
+                    // Відправляємо хід в ефір
+                    sendOverRadio(`CHECKERS:MOVE:${selectedSquare.x}${selectedSquare.y}${x}${y}`);
+                    
+                    selectedSquare = null;
+                    myTurn = false;
+                    setStatus("🔴 Хід суперника", "var(--hit-color)");
+                }
+            }
+        }
+
+        function isValidMove(fx, fy, tx, ty, piece) {
+            let dx = tx - fx;
+            let dy = ty - fy;
+            let adx = Math.abs(dx), ady = Math.abs(dy);
+
+            if (adx !== ady || adx > 2 || adx === 0) return false; // Тільки діагональ на 1 або 2 клітинки
+
+            let isKing = (piece > 2);
+            
+            // Звичайні шашки ходять тільки вперед
+            if (!isKing) {
+                if (piece === 1 && dy > 0) return false; // Білі вгору (-y)
+                if (piece === 2 && dy < 0) return false; // Чорні вниз (+y)
+            }
+
+            // Звичайний хід
+            if (adx === 1) return true;
+
+            // Стрибок (Взяття)
+            if (adx === 2) {
+                let mx = fx + dx/2, my = fy + dy/2;
+                let midPiece = board[my][mx];
+                if (midPiece === 0) return false; // Посередині пусто
+                
+                let isMyPieceWhite = (piece === 1 || piece === 3);
+                let isMidPieceWhite = (midPiece === 1 || midPiece === 3);
+                
+                if (isMyPieceWhite === isMidPieceWhite) return false; // Не можна бити своїх
+                
+                return true;
+            }
+            return false;
+        }
+
+        function executeMove(fx, fy, tx, ty) {
+            let piece = board[fy][fx];
+            
+            // Якщо це був стрибок - видаляємо збиту фішку
+            if (Math.abs(tx - fx) === 2) {
+                board[fy + (ty-fy)/2][fx + (tx-fx)/2] = 0;
+            }
+            
+            board[ty][tx] = piece;
+            board[fy][fx] = 0;
+
+            // Перетворення в Дамку
+            if (piece === 1 && ty === 0) board[ty][tx] = 3;
+            if (piece === 2 && ty === 7) board[ty][tx] = 4;
+
+            renderBoard();
+        }
+
+        // --- МЕРЕЖЕВИЙ ЗВ'ЯЗОК ---
+        function connectRadio() {
+            log("> Підключення...");
+            radioSocket = new WebSocket("ws://" + window.location.host + "/ws"); 
+            
+            radioSocket.onopen = () => {
+                log("> 🟢 Підключено!");
+                document.getElementById('btnConnect').disabled = true;
+                document.getElementById('btnStart').disabled = false;
+                gameState = 'SETUP';
+                renderBoard();
+                setStatus("Натисніть 'Готовий до гри'");
+            };
+
+            radioSocket.onmessage = (e) => onRadioMessageReceived(e.data);
+            radioSocket.onerror = () => log("❌ Помилка з'єднання з bridge.py");
+        }
+
+        function sendOverRadio(text) {
+            if (radioSocket && radioSocket.readyState === 1) {
+                let target = document.getElementById('enemyNick').value.trim();
+                if (target === "") target = "BROADCAST";
+                radioSocket.send(`${target}|${text}`);
+            }
+        }
+
+        function onRadioMessageReceived(msg) {
+            if (!msg.startsWith('CHECKERS:')) return; 
+
+            log(`📥 ОТРИМАНО: ${msg}`);
+            const parts = msg.split(':');
+            const cmd = parts[1];
+
+            if (gameState === 'GAME_OVER') return;
+
+            if (cmd === 'READY') {
+                if (gameState === 'WAITING_OPPONENT') {
+                    startGamePlay('white');
+                    sendOverRadio("CHECKERS:START"); 
+                }
+            } 
+            else if (cmd === 'START') {
+                if (gameState === 'WAITING_OPPONENT') {
+                    startGamePlay('black');
+                }
+            }
+            else if (cmd === 'MOVE') { 
+                let m = parts[2]; // формат "fx fy tx ty" -> "2534"
+                let fx = parseInt(m[0]), fy = parseInt(m[1]), tx = parseInt(m[2]), ty = parseInt(m[3]);
+                
+                executeMove(fx, fy, tx, ty);
+                myTurn = true;
+                setStatus("🟢 Ваш хід!", "var(--ship-color)");
+            }
+        }
+
+        function startGame() {
+            gameState = 'WAITING_OPPONENT';
+            document.getElementById('btnStart').disabled = true;
+            setStatus("Очікуємо суперника...", "var(--water-color)");
+            sendOverRadio("CHECKERS:READY"); 
+        }
+
+        function startGamePlay(color) {
+            gameState = 'PLAYING';
+            myColor = color;
+            myTurn = (color === 'white'); // Білі ходять першими
+            
+            // Якщо граємо чорними - візуально розвертаємо дошку і фішки
+            if (myColor === 'black') {
+                document.getElementById('board').style.transform = 'rotate(180deg)';
+                // Розвертаємо фішки назад, щоб корони дамок не були догори дриґом
+                const style = document.createElement('style');
+                style.innerHTML = '.piece { transform: rotate(-180deg); }';
+                document.head.appendChild(style);
+            }
+            
+            log(`🔥 Гра розпочата! Ви граєте ${color === 'white' ? 'БІЛИМИ' : 'ЧОРНИМИ'}.`);
+            setStatus(myTurn ? "🟢 Ваш хід!" : "🔴 Хід суперника", myTurn ? "var(--ship-color)" : "var(--hit-color)");
+        }
+    </script>
+</body>
+</html>

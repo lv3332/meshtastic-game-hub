@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meshtastic Морський Бій</title>
+    <style>
+        :root {
+            --bg-color: #1e1e2e; --text-color: #cdd6f4; --panel-bg: #313244;
+            --grid-border: #45475a; --water-color: #89b4fa; --ship-color: #a6e3a1;
+            --hit-color: #f38ba8; --miss-color: #bac2de; --cell-size: 30px;
+        }
+        body { font-family: sans-serif; background-color: var(--bg-color); color: var(--text-color); display: flex; flex-direction: column; align-items: center; padding: 10px; }
+        .controls { background-color: var(--panel-bg); padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; width: 100%; max-width: 600px; box-sizing: border-box; }
+        input[type="text"] { padding: 8px; border: 1px solid var(--grid-border); border-radius: 4px; background-color: var(--bg-color); color: var(--text-color); width: 150px; text-align: center; }
+        button { padding: 8px 15px; border: none; border-radius: 4px; background-color: var(--water-color); color: var(--bg-color); font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover:not(:disabled) { opacity: 0.8; }
+        button:disabled { background-color: #585b70; cursor: not-allowed; color: #a6adc8; }
+        .game-board { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+        .board-container { display: flex; flex-direction: column; align-items: center; }
+        .board-title { margin-bottom: 10px; font-weight: bold; }
+        .grid { display: grid; grid-template-columns: 20px repeat(10, var(--cell-size)); grid-template-rows: 20px repeat(10, var(--cell-size)); gap: 1px; background-color: var(--grid-border); border: 2px solid var(--grid-border); }
+        .cell { background-color: var(--bg-color); display: flex; justify-content: center; align-items: center; font-size: 0.8rem; cursor: pointer; transition: 0.2s; }
+        .cell.header { background-color: var(--panel-bg); font-weight: bold; cursor: default; }
+        .cell.enemy:hover { background-color: #45475a; }
+        .cell.ship { background-color: var(--ship-color); }
+        .cell.hit { background-color: var(--hit-color); color: #11111b; font-weight: bold; }
+        .cell.miss { background-color: var(--miss-color); color: #11111b; }
+        .cell.hit::after { content: 'X'; }
+        .cell.miss::after { content: '•'; }
+        .log-panel { margin-top: 20px; background-color: var(--panel-bg); padding: 10px; border-radius: 8px; width: 100%; max-width: 600px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.9rem;}
+        #turnIndicator { width: 100%; max-width: 600px; text-align: center; font-weight: bold; margin-bottom: 10px; padding: 10px; border-radius: 4px; background-color: var(--panel-bg); }
+    </style>
+</head>
+<body>
+
+    <h1>Meshtastic: Морський Бій</h1>
+
+    <div class="controls">
+        <button id="btnConnect" onclick="connectRadio()">🔌 Підключити</button>
+        <input type="text" id="enemyNick" placeholder="Нік суперника">
+        <button id="btnPlace" onclick="autoPlaceShips()" disabled>🎲 Розставити</button>
+        <button id="btnStart" onclick="startGame()" disabled>🚀 Готовий</button>
+    </div>
+
+    <div id="turnIndicator">Очікування підключення модема...</div>
+
+    <div class="game-board">
+        <div class="board-container">
+            <div class="board-title">Моя акваторія</div>
+            <div id="myGrid" class="grid"></div>
+        </div>
+        <div class="board-container">
+            <div class="board-title">Акваторія суперника</div>
+            <div id="enemyGrid" class="grid"></div>
+        </div>
+    </div>
+
+    <div class="log-panel" id="logPanel">
+        > Система готова. Введіть короткий нік суперника (або залиште пустим для Broadcast).<br>
+    </div>
+
+    <script>
+        const letters = ['А', 'Б', 'В', 'Г', 'Д', 'Е', 'Є', 'Ж', 'З', 'И'];
+        const SHIPS_INFO = [4, 3, 3, 2, 2, 2, 1, 1, 1, 1];
+        
+        let myBoard = [], enemyBoard = [];
+        let myShips = []; 
+        let gameState = 'WAITING_RADIO'; 
+        let myTurn = false;
+        let radioSocket = null;
+
+        function log(message) {
+            const panel = document.getElementById('logPanel');
+            const time = new Date().toLocaleTimeString();
+            panel.innerHTML += `[${time}] ${message}<br>`;
+            panel.scrollTop = panel.scrollHeight;
+        }
+
+        function setStatus(text, color = "var(--text-color)") {
+            const indicator = document.getElementById('turnIndicator');
+            indicator.innerText = text;
+            indicator.style.color = color;
+        }
+
+        // --- МЕРЕЖА ---
+        function connectRadio() {
+            log("> Підключення до сервера...");
+            radioSocket = new WebSocket("ws://" + window.location.host + "/ws"); 
+            
+            radioSocket.onopen = () => {
+                log("> 🟢 Підключено до модема!");
+                document.getElementById('btnConnect').disabled = true;
+                document.getElementById('btnPlace').disabled = false;
+                gameState = 'SETUP';
+                setStatus("Розставте кораблі", "var(--text-color)");
+            };
+
+            radioSocket.onmessage = (event) => {
+                onRadioMessageReceived(event.data);
+            };
+
+            radioSocket.onerror = () => {
+                log("❌ Помилка з'єднання. Перевірте Python сервер.");
+            };
+        }
+
+        function sendOverRadio(textPayload) {
+            if (radioSocket && radioSocket.readyState === WebSocket.OPEN) {
+                let target = document.getElementById('enemyNick').value.trim();
+                if (target === "") target = "BROADCAST";
+                
+                log(`📡 ВІДПРАВКА до [${target}]: ${textPayload}`);
+                radioSocket.send(`${target}|${textPayload}`);
+            } else {
+                log("❌ Помилка: Модем відключено!");
+            }
+        }
+
+        function onRadioMessageReceived(msg) {
+            if (msg.startsWith('SYS:ERROR:')) {
+                log(`❌ Помилка мережі: ${msg.split(':')[2]}`);
+                return;
+            }
+
+            if (!msg.startsWith('MB:')) return; 
+            log(`📥 ОТРИМАНО: ${msg}`);
+
+            const parts = msg.split(':');
+            const cmd = parts[1];
+
+            if (gameState === 'GAME_OVER') return;
+
+            if (cmd === 'READY') {
+                log("> Суперник готовий до бою!");
+                if (gameState === 'WAITING_OPPONENT') {
+                    startGamePlay(true); 
+                    sendOverRadio("MB:START"); 
+                }
+            } 
+            else if (cmd === 'START') {
+                if (gameState === 'WAITING_OPPONENT') {
+                    startGamePlay(false); 
+                }
+            }
+            else if (cmd === 'S') { 
+                processIncomingShot(parseInt(parts[2]), parseInt(parts[3]));
+            } 
+            else if (cmd === 'M') { 
+                const x = parseInt(parts[2]), y = parseInt(parts[3]);
+                enemyBoard[y][x] = 2;
+                document.getElementById(`enemy_${x}_${y}`).classList.add('miss');
+                log(`💨 ПРОМАХ. Хід переходить до суперника.`);
+                myTurn = false;
+                setStatus("🔴 Хід суперника", "var(--hit-color)");
+            } 
+            else if (cmd === 'H') { 
+                const x = parseInt(parts[2]), y = parseInt(parts[3]);
+                enemyBoard[y][x] = 3;
+                document.getElementById(`enemy_${x}_${y}`).classList.add('hit');
+                log(`🎯 ВЛУЧАННЯ! Ваш хід продовжується.`);
+                myTurn = true;
+            } 
+            else if (cmd === 'K') { 
+                const coords = [];
+                for(let i = 2; i < parts.length; i+=2) {
+                    coords.push({x: parseInt(parts[i]), y: parseInt(parts[i+1])});
+                }
+                
+                coords.forEach(c => {
+                    enemyBoard[c.y][c.x] = 3;
+                    document.getElementById(`enemy_${c.x}_${c.y}`).classList.add('hit');
+                });
+                markSurroundingsAsMiss(enemyBoard, true, coords);
+                log(`💥 КОРАБЕЛЬ ЗНИЩЕНО! Ваш хід продовжується.`);
+                myTurn = true;
+            }
+            else if (cmd === 'WIN') { 
+                gameState = 'GAME_OVER';
+                myTurn = false;
+                setStatus("🏆 ПЕРЕМОГА! Ворожий флот знищено!", "var(--ship-color)");
+                alert("🏆 ПЕРЕМОГА! Ви виграли бій!");
+            }
+        }
+
+        function processIncomingShot(x, y) {
+            const coord = `${letters[x]}${y + 1}`;
+            const cell = document.getElementById(`my_${x}_${y}`);
+
+            if (myBoard[y][x] === 1) { 
+                myBoard[y][x] = 3;
+                cell.classList.add('hit');
+                
+                let hitShip = myShips.find(ship => ship.coords.some(c => c.x === x && c.y === y));
+                hitShip.hits++;
+
+                if (hitShip.hits === hitShip.coords.length) {
+                    log(`💀 Ваш корабель потоплено на ${coord}!`);
+                    markSurroundingsAsMiss(myBoard, false, hitShip.coords);
+                    
+                    let killMsg = `MB:K`;
+                    hitShip.coords.forEach(c => killMsg += `:${c.x}:${c.y}`);
+                    sendOverRadio(killMsg);
+
+                    if (myShips.every(s => s.hits === s.coords.length)) {
+                        sendOverRadio("MB:WIN");
+                        gameState = 'GAME_OVER';
+                        setStatus("☠️ ПОРАЗКА... Ваш флот на дні.", "var(--hit-color)");
+                        alert("☠️ ПОРАЗКА... Всі ваші кораблі знищено.");
+                    }
+                } else {
+                    log(`🔥 Вас поранили на ${coord}.`);
+                    sendOverRadio(`MB:H:${x}:${y}`);
+                }
+            } else { 
+                if (myBoard[y][x] === 0) myBoard[y][x] = 2;
+                cell.classList.add('miss');
+                log(`💦 Ворог промазав по ${coord}. Ваш хід!`);
+                sendOverRadio(`MB:M:${x}:${y}`);
+                myTurn = true;
+                setStatus("🟢 Ваш хід! Стріляйте.", "var(--ship-color)");
+            }
+        }
+
+        // --- ЛОГІКА ПОЛІВ ---
+        function createGrid(containerId, isEnemy) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = ''; 
+            const emptyCorner = document.createElement('div');
+            emptyCorner.className = 'cell header';
+            container.appendChild(emptyCorner);
+            for (let i = 0; i < 10; i++) {
+                const letterCell = document.createElement('div'); letterCell.className = 'cell header'; letterCell.innerText = letters[i]; container.appendChild(letterCell);
+            }
+            for (let y = 0; y < 10; y++) {
+                const numberCell = document.createElement('div'); numberCell.className = 'cell header'; numberCell.innerText = y + 1; container.appendChild(numberCell);
+                for (let x = 0; x < 10; x++) {
+                    const cell = document.createElement('div'); cell.className = isEnemy ? 'cell enemy' : 'cell'; cell.id = `${isEnemy ? 'enemy' : 'my'}_${x}_${y}`;
+                    if (isEnemy) cell.addEventListener('click', () => handleMyShot(x, y));
+                    container.appendChild(cell);
+                }
+            }
+        }
+
+        function initEmptyBoard() { return Array(10).fill().map(() => Array(10).fill(0)); }
+
+        function autoPlaceShips() {
+            if (gameState !== 'SETUP') return;
+            myBoard = initEmptyBoard(); enemyBoard = initEmptyBoard(); myShips = [];
+            for (let length of SHIPS_INFO) {
+                let placed = false;
+                while (!placed) {
+                    let isHoriz = Math.random() >= 0.5, x = Math.floor(Math.random()*10), y = Math.floor(Math.random()*10);
+                    if (canPlaceShip(myBoard, x, y, length, isHoriz)) {
+                        let coords = [];
+                        for (let i = 0; i < length; i++) {
+                            let cx = isHoriz ? x + i : x, cy = isHoriz ? y : y + i;
+                            myBoard[cy][cx] = 1; coords.push({x: cx, y: cy});
+                        }
+                        myShips.push({coords: coords, hits: 0});
+                        placed = true;
+                    }
+                }
+            }
+            renderMyBoard();
+            document.getElementById('btnStart').disabled = false;
+        }
+
+        function canPlaceShip(board, x, y, length, isHorizontal) {
+            if (isHorizontal && x + length > 10) return false;
+            if (!isHorizontal && y + length > 10) return false;
+            for (let i = 0; i < length; i++) {
+                let cx = isHorizontal ? x + i : x; let cy = isHorizontal ? y : y + i;
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        let nx = cx + dx, ny = cy + dy;
+                        if (nx >= 0 && nx < 10 && ny >= 0 && ny < 10 && board[ny][nx] === 1) return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        function renderMyBoard() {
+            for (let y = 0; y < 10; y++) {
+                for (let x = 0; x < 10; x++) {
+                    const cell = document.getElementById(`my_${x}_${y}`);
+                    cell.className = 'cell'; 
+                    if (myBoard[y][x] === 1) cell.classList.add('ship');
+                    if (myBoard[y][x] === 2) cell.classList.add('miss');
+                    if (myBoard[y][x] === 3) cell.classList.add('hit');
+                }
+            }
+        }
+
+        function markSurroundingsAsMiss(board, isEnemyUI, shipCoords) {
+            shipCoords.forEach(coord => {
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        let nx = coord.x + dx; let ny = coord.y + dy;
+                        if (nx >= 0 && nx < 10 && ny >= 0 && ny < 10 && board[ny][nx] === 0) {
+                            board[ny][nx] = 2; 
+                            document.getElementById(isEnemyUI ? `enemy_${nx}_${ny}` : `my_${nx}_${ny}`).classList.add('miss');
+                        }
+                    }
+                }
+            });
+        }
+
+        function startGame() {
+            gameState = 'WAITING_OPPONENT';
+            document.getElementById('btnPlace').disabled = true;
+            document.getElementById('btnStart').disabled = true;
+            setStatus("Очікуємо суперника...", "var(--water-color)");
+            sendOverRadio("MB:READY"); 
+        }
+
+        function startGamePlay(isFirstTurn) {
+            gameState = 'PLAYING';
+            myTurn = isFirstTurn;
+            log(isFirstTurn ? "🔥 Бій розпочато! ВИ ХОДИТЕ ПЕРШИМ." : "🔥 Бій розпочато! СУПЕРНИК ХОДИТЬ ПЕРШИМ.");
+            setStatus(isFirstTurn ? "🟢 Ваш хід! Стріляйте." : "🔴 Хід суперника", isFirstTurn ? "var(--ship-color)" : "var(--hit-color)");
+        }
+
+        function handleMyShot(x, y) {
+            if (gameState !== 'PLAYING') return;
+            if (!myTurn) { log("Зачекайте, зараз хід суперника!"); return; }
+            if (enemyBoard[y][x] !== 0) return; 
+
+            const coord = `${letters[x]}${y + 1}`;
+            log(`> Постріл по ${coord}. Чекаємо підтвердження...`);
+            
+            myTurn = false; 
+            sendOverRadio(`MB:S:${x}:${y}`);
+        }
+
+        window.onload = () => { createGrid('myGrid', false); createGrid('enemyGrid', true); };
+    </script>
+</body>
+</html>
